@@ -116,6 +116,8 @@ class SmartDevice:
         _LOGGER.debug("Initializing %s", self.host)
         self._device_type = DeviceType.Unknown
         self._sys_info: Optional[Dict] = None
+        self._available_modules = None
+        self._last_result = None
 
     async def _query_helper(
         self, target: str, cmd: str, arg: Optional[Dict] = None, child_ids=None
@@ -168,21 +170,64 @@ class SmartDevice:
         features = sys_info["feature"].split(":")
         return "ENE" in features
 
-    async def get_sys_info(self) -> Dict[str, Any]:
-        """Retrieve system information.
+    async def find_supported_modules(self, include_stats=False, include_extras=False):
+        """Identify the modules supported by the device."""
+        from kasa import Discover
 
-        :return: sysinfo
-        :rtype dict
-        :raises SmartDeviceException: on error
+        module_candidates = Discover.DISCOVERY_QUERY.copy()
+        if include_stats:
+            year = datetime.now().year
+            module_candidates[self.emeter_type].update(
+                {"get_daystat": {"month": datetime.now().month, "year": year}}
+            )
+            module_candidates[self.emeter_type].update(
+                {"get_monthstat": {"year": year}}
+            )
+        if include_extras:
+            module_candidates["anti_theft"] = {"get_rules": None}
+            module_candidates["count_down"] = {"get_rules": None}
+            module_candidates["schedule"] = {"get_rules": None}
+        try:
+            res = await self.protocol.query(host=self.host, request=module_candidates)
+        except Exception as ex:
+            raise SmartDeviceException(
+                f"Unable to find supported modules for {self.host}"
+            ) from ex
+
+        for module, response in res.items():
+            if "err_code" in response:
+                _LOGGER.debug("module %s: NOPE", module)
+                del module_candidates[module]
+            else:
+                _LOGGER.debug("module %s: OK!", module)
+
+        self._last_result = res
+        self._available_modules = module_candidates
+
+    async def update(self, *, include_stats=False, include_extras=False):
+        """Update the device status.
+
+        During the first request this will try to access all known modules of the devices
+        and cache the contents locally.
+        Future calls will only requests updates from supported modules.
+
+        This has to be called at least once to populate the internal structures.
+
+        Needed for property getters that are decorated with `requires_update`.
         """
-        return await self._query_helper("system", "get_sysinfo")
+        if self._available_modules is None:
+            await self.find_supported_modules(include_stats, include_extras)
+        else:
+            try:
+                self._last_result = await self.protocol.query(
+                    host=self.host, request=self._available_modules
+                )
+            except Exception as ex:
+                raise SmartDeviceException(
+                    f"Unable to update for {self.host}: %s", ex
+                ) from ex
 
-    async def update(self):
-        """Update some of the attributes.
-
-        Needed for methods that are decorated with `requires_update`.
-        """
-        self._sys_info = await self.get_sys_info()
+        self._sys_info = self._last_result["system"]["get_sysinfo"]
 
     @property  # type: ignore
     @requires_update
@@ -205,8 +250,7 @@ class SmartDevice:
         :rtype: str
         :raises SmartDeviceException: on error
         """
-        sys_info = self.sys_info
-        return str(sys_info["model"])
+        return str(self.sys_info["model"])
 
     @property  # type: ignore
     @requires_update
@@ -216,8 +260,7 @@ class SmartDevice:
         :return: Device name aka alias.
         :rtype: str
         """
-        sys_info = self.sys_info
-        return str(sys_info["alias"])
+        return str(self.sys_info["alias"])
 
     async def set_alias(self, alias: str) -> None:
         """Set the device name (alias).
@@ -239,21 +282,6 @@ class SmartDevice:
         """
         return await self._query_helper("system", "get_dev_icon")
 
-    def set_icon(self, icon: str) -> None:
-        """Set device icon.
-
-        Content for hash and icon are unknown.
-
-        :param str icon: Icon path(?)
-        :raises NotImplementedError: when not implemented
-        :raises SmartPlugError: on error
-        """
-        raise NotImplementedError()
-        # here just for the sake of completeness
-        # await self._query_helper("system",
-        #                    "set_dev_icon", {"icon": "", "hash": ""})
-        # self.initialize()
-
     async def get_time(self) -> Optional[datetime]:
         """Return current time from the device.
 
@@ -271,41 +299,9 @@ class SmartDevice:
                 res["min"],
                 res["sec"],
             )
-        except SmartDeviceException:
+        except SmartDeviceException as ex:
+            _LOGGER.error("Unable to get the device time: %s", ex)
             return None
-
-    async def set_time(self, ts: datetime) -> None:
-        """Set the device time.
-
-        Note: this calls set_timezone() for setting.
-
-        :param datetime ts: New date and time
-        :return: result
-        :type: dict
-        :raises NotImplemented: when not implemented.
-        :raises SmartDeviceException: on error
-        """
-        raise NotImplementedError("Fails with err_code == 0 with HS110.")
-        """
-        here just for the sake of completeness.
-        if someone figures out why it doesn't work,
-        please create a PR :-)
-        ts_obj = {
-            "index": self.timezone["index"],
-            "hour": ts.hour,
-            "min": ts.minute,
-            "sec": ts.second,
-            "year": ts.year,
-            "month": ts.month,
-            "mday": ts.day,
-        }
-
-
-        response = await self._query_helper("time", "set_timezone", ts_obj)
-        self.initialize()
-
-        return response
-        """
 
     async def get_timezone(self) -> Dict:
         """Return timezone information.
@@ -404,18 +400,20 @@ class SmartDevice:
         await self._query_helper("system", "set_mac_addr", {"mac": mac})
         await self.update()
 
+    @property  # type: ignore
     @requires_update
-    async def get_emeter_realtime(self) -> EmeterStatus:
-        """Retrieve current energy readings.
+    def emeter_realtime(self) -> EmeterStatus:
+        """Return current energy readings.
 
         :returns: current readings or False
         :rtype: dict, None
         :raises SmartDeviceException: on error
         """
+        assert self._last_result is not None
         if not self.has_emeter:
             raise SmartDeviceException("Device has no emeter")
 
-        return EmeterStatus(await self._query_helper(self.emeter_type, "get_realtime"))
+        return EmeterStatus(self._last_result[self.emeter_type]["get_realtime"])
 
     @requires_update
     async def get_emeter_daily(
@@ -499,6 +497,7 @@ class SmartDevice:
         :return: the current power consumption in Watts.
         :raises SmartDeviceException: on error
         """
+        raise SmartDeviceException("Obsolete, access emeter's 'power' directly")
         if not self.has_emeter:
             raise SmartDeviceException("Device has no emeter")
 
@@ -514,6 +513,7 @@ class SmartDevice:
         :param delay: Delay the reboot for `delay` seconds.
         :return: None
         """
+        assert delay > 0
         await self._query_helper("system", "reboot", {"delay": delay})
 
     async def turn_off(self) -> None:

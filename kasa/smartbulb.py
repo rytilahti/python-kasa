@@ -129,18 +129,14 @@ class SmartBulb(SmartDevice):
 
     async def update(self):
         """Update `sys_info and `light_state`."""
-        self._sys_info = await self.get_sys_info()
-        self._light_state = await self.get_light_state()
+        await super().update()
+        self._light_state = self._last_result[self.LIGHT_SERVICE]["get_light_state"]
 
     @property  # type: ignore
     @requires_update
     def light_state(self) -> Optional[Dict[str, Dict]]:
         """Query the light state."""
         return self._light_state
-
-    async def get_light_state(self) -> Dict[str, Dict]:
-        """Query the light state."""
-        return await self._query_helper(self.LIGHT_SERVICE, "get_light_state")
 
     async def set_light_state(self, state: Dict) -> Dict:
         """Set the light state."""
