@@ -653,6 +653,18 @@ class SmartDevice:
             )
             return await _join("smartlife.iot.common.softaponboarding", payload)
 
+    async def wifi_info(self):
+        """Return information about the connected wifi network."""
+        try:
+            return await self._query_helper("netif", "get_stainfo")
+        except SmartDeviceException as ex:
+            _LOGGER.debug(
+                "Unable to query 'netif', retrying with 'softaponboarding': %s", ex
+            )
+            return await self._query_helper(
+                "smartlife.iot.common.softaponboarding", "get_stainfo"
+            )
+
     def get_plug_by_name(self, name: str) -> "SmartDevice":
         """Return child device for the given name."""
         for p in self.children:

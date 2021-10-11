@@ -127,6 +127,16 @@ async def join(dev: SmartDevice, ssid, password, keytype):
     return res
 
 
+@wifi.command()
+@pass_dev
+async def info(dev: SmartDevice):
+    """Print wifi information."""
+    res = await dev.wifi_info()
+    click.echo(res)
+
+    return res
+
+
 @cli.command()
 @click.option("--timeout", default=3, required=False)
 @click.option("--discover-only", default=False)
