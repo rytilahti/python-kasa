@@ -12,7 +12,7 @@ from ..emeterstatus import EmeterStatus
 from ..exceptions import AuthenticationException, SmartDeviceException, SmartErrorCode
 from ..feature import Feature, FeatureType
 from ..smartprotocol import SmartProtocol
-from .modules import DeviceModule, TimeModule, EnergyModule  # noqa: F403
+from .modules import DeviceModule, TimeModule, EnergyModule, LedModule  # noqa: F403
 from .smartmodule import SmartModule
 
 _LOGGER = logging.getLogger(__name__)
